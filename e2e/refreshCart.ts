@@ -15,12 +15,44 @@ interface RenderableElement extends Element {
   renderContents(sections: any): void;
 }
 type ThemeHandler = (...args: any[]) => Promise<boolean | void> | boolean | void;
+
+// Helper: Wait for animations/transitions to complete
+async function waitForAnimations(ms: number = 300): Promise<void> {
+  await new Promise((r) => setTimeout(r, ms));
+  await new Promise((r) => requestAnimationFrame(r));
+}
+
+// Helper: Trigger common cart update events that themes listen to
+function triggerCartEvents(cart: any, count: number): void {
+  document.dispatchEvent(new CustomEvent("cart:update", { 
+    detail: { cart }, 
+    bubbles: true 
+  }));
+  document.dispatchEvent(new CustomEvent("cart:refresh", { 
+    detail: { cart, cartCount: count }, 
+    bubbles: true 
+  }));
+  window.dispatchEvent(new Event("update_cart"));
+  
+  const call = (fn: any, ...args: any[]) => {
+    try {
+      if (typeof fn === "function") fn(...args);
+    } catch {}
+  };
+  
+  call((window as any).Shopify?.onCartUpdate, cart, true);
+  call((window as any).theme?.Cart?.setCurrentData, cart);
+}
+
 const THEME_HANDLERS: Record<string, ThemeHandler> = {
   // keys are normalized to lowercase schema values
   galleria: refreshAndOpenGalleriaCart,
   north: refreshAndOpenNorthCart,
-  // add more themes here e.g.:
-  // "dawn": refreshAndOpenDawnCart,
+  sunrise: refreshAndOpenSunriseCart,
+  "mr parker": refreshAndOpenMrParkerCart,
+  grid: refreshAndOpenGridCart,
+  impact: refreshAndOpenImpactCart,
+  hyper: refreshAndOpenHyperCart,
 };
 
 export async function refreshCartRouter(...args: any[]): Promise<boolean> {
@@ -169,6 +201,548 @@ export async function refreshAndOpenNorthCart(...args: any[]) {
   }
   return true;
 }
+
+export async function refreshAndOpenSunriseCart(...args: any[]) {
+  const theme = window?.Shopify?.theme;
+  if (!theme || theme.schema_name !== "Sunrise") {
+    console.log("[refreshAndOpenSunriseCart] Not Sunrise theme, skipping");
+    return;
+  }
+
+  try {
+    const cartRes = await fetch("/cart.js", {
+      credentials: "same-origin",
+      cache: "no-cache",
+    });
+    if (!cartRes.ok) {
+      console.log("[refreshAndOpenSunriseCart] Failed to fetch cart.js");
+      return false;
+    }
+    const cart = await cartRes.json();
+    const count = cart.item_count || 0;
+
+    const cartLink = document.querySelector('a[href*="/cart"]');
+    if (cartLink) {
+      const countElement = cartLink.querySelector("em");
+      if (countElement && countElement.textContent !== String(count)) {
+        countElement.textContent = String(count);
+      }
+      const spanElement = cartLink.querySelector("span");
+      if (spanElement && spanElement.textContent) {
+        const needsSingular = count === 1 && spanElement.textContent.includes("items");
+        const needsPlural = count !== 1 && spanElement.textContent.includes("item") && !spanElement.textContent.includes("items");
+        if (needsSingular) {
+          spanElement.textContent = spanElement.textContent.replace("items", "item");
+        } else if (needsPlural) {
+          spanElement.textContent = spanElement.textContent.replace("item", "items");
+        }
+      }
+    }
+
+    const countSelectors = [
+      "[data-cart-count]",
+      ".cart-count",
+      ".cart-count-mobile",
+      "#cart-count"
+    ];
+    countSelectors.forEach(sel => {
+      document.querySelectorAll<HTMLElement>(sel).forEach(el => {
+        if (el.textContent !== String(count)) {
+          el.textContent = String(count);
+        }
+      });
+    });
+
+    triggerCartEvents(cart, count);
+    await waitForAnimations(200);
+
+    return true;
+  } catch (err) {
+    console.log("[refreshAndOpenSunriseCart] Failed", err);
+    return false;
+  }
+}
+
+export async function refreshAndOpenMrParkerCart(...args: any[]) {
+  const theme = window?.Shopify?.theme;
+  if (!theme || theme.schema_name !== "Mr Parker") {
+    console.log("[refreshAndOpenMrParkerCart] Not Mr Parker theme, skipping");
+    return;
+  }
+
+  try {
+    const cartRes = await fetch("/cart.js", {
+      credentials: "same-origin",
+      cache: "no-cache",
+    });
+    if (!cartRes.ok) {
+      console.log("[refreshAndOpenMrParkerCart] Failed to fetch cart.js");
+      return false;
+    }
+    const cart = await cartRes.json();
+    const count = cart.item_count || 0;
+
+    const countElement = document.querySelector(".js-cart-count");
+    if (countElement && countElement.textContent !== String(count)) {
+      countElement.textContent = String(count);
+    }
+
+    let sectionsData: any = null;
+    const sectionNames = ["ajax-cart", "mini-cart", "cart-drawer"];
+    for (const sectionName of sectionNames) {
+      try {
+        const res = await fetch(`/?sections=${sectionName}`, {
+          credentials: "same-origin",
+        });
+        if (res.ok) {
+          sectionsData = await res.json();
+          if (sectionsData[sectionName]) break;
+        }
+      } catch (e) {
+        continue;
+      }
+    }
+
+    if (sectionsData) {
+      const parser = new DOMParser();
+      const drawer = document.querySelector("#slideout-ajax-cart");
+      if (drawer) {
+        const drawerStyle = window.getComputedStyle(drawer);
+        if (drawerStyle.display !== "none" && drawerStyle.visibility !== "hidden") {
+          for (const [key, html] of Object.entries(sectionsData)) {
+            if (typeof html !== "string") continue;
+            const parsed = parser.parseFromString(html, "text/html");
+            const cartContent = parsed.querySelector("#slideout-ajax-cart") ||
+                              parsed.querySelector(".mini-cart") ||
+                              parsed.body.firstElementChild;
+            if (cartContent) {
+              const existingContent = drawer.querySelector(".mini-cart") || drawer;
+              if (existingContent) {
+                existingContent.innerHTML = cartContent.innerHTML;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    triggerCartEvents(cart, count);
+    await waitForAnimations(200);
+
+    return true;
+  } catch (err) {
+    console.log("[refreshAndOpenMrParkerCart] Failed", err);
+    return false;
+  }
+}
+
+export async function refreshAndOpenGridCart(...args: any[]) {
+  const theme = window?.Shopify?.theme;
+  if (!theme || theme.schema_name !== "Grid") {
+    console.log("[refreshAndOpenGridCart] Not Grid theme, skipping");
+    return;
+  }
+
+  try {
+    const cartRes = await fetch("/cart.js", {
+      credentials: "same-origin",
+      cache: "no-cache",
+    });
+    if (!cartRes.ok) {
+      console.log("[refreshAndOpenGridCart] Failed to fetch cart.js");
+      return false;
+    }
+    const cart = await cartRes.json();
+    const count = cart.item_count || 0;
+
+    const countElement = document.querySelector(".cart-count-number");
+    if (countElement && countElement.textContent !== String(count)) {
+      countElement.textContent = String(count);
+    }
+    
+    const cartLink = document.querySelector('a[href="/cart"]');
+    if (cartLink) {
+      const linkText = cartLink.textContent?.trim() || "";
+      if (linkText.includes("Cart") && linkText.includes("(")) {
+        const newText = linkText.replace(/\((\d+)\)/, `(${count})`);
+        if (newText !== linkText) {
+          cartLink.textContent = newText;
+        }
+      } else if (linkText.includes("Cart") && !linkText.includes(String(count))) {
+        cartLink.textContent = `Cart (${count})`;
+      }
+    }
+
+    const countSelectors = [
+      "[data-cart-count]",
+      ".cart-count",
+      "#cart-count"
+    ];
+    countSelectors.forEach(sel => {
+      document.querySelectorAll<HTMLElement>(sel).forEach(el => {
+        const text = el.textContent || "";
+        if (/\d+/.test(text) && text !== String(count)) {
+          el.textContent = text.replace(/\d+/, String(count));
+        }
+      });
+    });
+
+    let successMsg = document.querySelector(".product-message.success-message");
+    triggerCartEvents(cart, count);
+    await waitForAnimations(300);
+    
+    if (successMsg) {
+      successMsg.remove();
+    }
+
+    triggerCartEvents(cart, count);
+    await waitForAnimations(300);
+
+    return true;
+  } catch (err) {
+    console.log("[refreshAndOpenGridCart] Failed", err);
+    return false;
+  }
+}
+
+export async function refreshAndOpenImpactCart(...args: any[]) {
+  const theme = window?.Shopify?.theme;
+  if (!theme || theme.schema_name !== "Impact") {
+    console.log("[refreshAndOpenImpactCart] Not Impact theme, skipping");
+    return;
+  }
+
+  try {
+    const cartRes = await fetch("/cart.js", {
+      credentials: "same-origin",
+      cache: "no-cache",
+    });
+    if (!cartRes.ok) {
+      console.log("[refreshAndOpenImpactCart] Failed to fetch cart.js");
+      return false;
+    }
+    const cart = await cartRes.json();
+    const count = cart.item_count || 0;
+
+    const allCartCounts = document.querySelectorAll("cart-count");
+    allCartCounts.forEach(cartCount => {
+      const countSpan = cartCount.querySelector('span[aria-hidden="true"]');
+      if (countSpan && countSpan.textContent !== String(count)) {
+        countSpan.textContent = String(count);
+      }
+      const srOnly = cartCount.querySelector('.sr-only');
+      if (srOnly) {
+        srOnly.textContent = `${count} ${count === 1 ? 'item' : 'items'}`;
+      }
+    });
+
+    triggerCartEvents(cart, count);
+    const lastItem = cart.items?.[cart.items.length - 1];
+    await waitForAnimations(300);
+
+    let sectionsData: any = null;
+    const sectionNames = ["cart-notification", "cart-dialog", "notification", "cart-popup", "cart-notification-product"];
+    for (const sectionName of sectionNames) {
+      try {
+        const res = await fetch(`/?sections=${sectionName}`, {
+          credentials: "same-origin",
+        });
+        if (res.ok) {
+          sectionsData = await res.json();
+          if (sectionsData[sectionName]) break;
+        }
+      } catch (e) {
+        continue;
+      }
+    }
+
+    let drawer = document.querySelector("cart-notification-drawer") as HTMLElement | null;
+    
+    if (drawer) {
+      await waitForAnimations(200);
+      drawer = document.querySelector("cart-notification-drawer");
+    }
+    
+    if (!drawer) {
+      const cartNotification = document.querySelector("cart-notification") as any;
+      
+      if (cartNotification) {
+        if (typeof cartNotification.renderContents === "function") {
+          try {
+            await cartNotification.renderContents();
+            await waitForAnimations(500);
+            drawer = document.querySelector("cart-notification-drawer");
+          } catch (e) {
+            console.log("[refreshAndOpenImpactCart] renderContents failed", e);
+          }
+        }
+        
+        const methods = ["show", "open", "update", "render"];
+        for (const method of methods) {
+          if (typeof cartNotification[method] === "function") {
+            try {
+              if (method === "update" || method === "render") {
+                cartNotification[method](cart);
+              } else {
+                cartNotification[method]();
+              }
+              await waitForAnimations(300);
+              drawer = document.querySelector("cart-notification-drawer");
+              if (drawer) break;
+            } catch (e) {}
+          }
+        }
+      }
+      
+      if (lastItem) {
+        document.dispatchEvent(new CustomEvent("cart:added", {
+          bubbles: true,
+          detail: { cart, item: lastItem }
+        }));
+        document.dispatchEvent(new CustomEvent("cart:update", {
+          bubbles: true,
+          detail: { cart }
+        }));
+        await waitForAnimations(500);
+        drawer = document.querySelector("cart-notification-drawer");
+      }
+      
+      if (!drawer) {
+        drawer = document.createElement("cart-notification-drawer");
+        drawer.setAttribute("open-from", "bottom");
+        drawer.setAttribute("class", "quick-buy-drawer drawer show-close-cursor");
+        drawer.setAttribute("role", "dialog");
+        drawer.setAttribute("aria-modal", "true");
+        document.body.appendChild(drawer);
+        await waitForAnimations(200);
+        let attempts = 0;
+        while (!drawer.shadowRoot && attempts < 10) {
+          await waitForAnimations(50);
+          attempts++;
+        }
+      }
+    }
+    
+    if (drawer && !drawer.classList.contains("show-close-cursor")) {
+      drawer.classList.add("show-close-cursor");
+    }
+    
+    if (drawer && drawer.shadowRoot) {
+      const contentPart = drawer.shadowRoot.querySelector('[part="content"]') as HTMLElement;
+      if (contentPart) {
+        const computed = window.getComputedStyle(contentPart);
+        if (!computed.clipPath || computed.clipPath === 'none') {
+          // Theme should set this via CSS
+        }
+      }
+    }
+    
+    if (drawer && lastItem) {
+      const itemPrice = lastItem.final_price || lastItem.line_price || lastItem.price;
+      const formattedPrice = itemPrice
+        ? new Intl.NumberFormat('de-DE', { 
+            style: 'currency', 
+            currency: cart.currency || 'EUR',
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2
+          }).format(itemPrice / 100)
+        : '';
+      
+      const imageUrl = lastItem.image || '';
+      const srcset = imageUrl 
+        ? `${imageUrl}&width=80 80w, ${imageUrl}&width=160 160w`
+        : '';
+      
+      drawer.innerHTML = `<div class="quick-buy-drawer__info"><div class="banner banner--success  justify-center"><svg role="presentation" focusable="false" stroke-width="2" width="18" height="18" class="offset-icon icon icon-success" style="--icon-height: 18px" viewBox="0 0 18 18">
+        <path d="M0 9C0 4.02944 4.02944 0 9 0C13.9706 0 18 4.02944 18 9C18 13.9706 13.9706 18 9 18C4.02944 18 0 13.9706 0 9Z" fill="currentColor"></path>
+        <path d="M5 8.8L7.62937 11.6L13 6" stroke="#ffffff" fill="none"></path>
+      </svg>Added to your cart!</div><div class="quick-buy-drawer__variant text-start h-stack gap-6"><img src="${imageUrl}" alt="${lastItem.product_title || ''}" ${srcset ? `srcset="${srcset}"` : ''} width="1000" height="1500" loading="lazy" sizes="80px" class="quick-buy-drawer__media rounded-xs"><div class="v-stack gap-1">
+      <div class="v-stack gap-0.5">
+        <a href="${lastItem.url || '#'}" class="bold justify-self-start">${lastItem.product_title || ''}</a><price-list class="price-list  "><sale-price class="text-subdued">
+      <span class="sr-only">Sale price</span>${formattedPrice}</sale-price></price-list></div><p class="text-sm text-subdued">${lastItem.variant_title || ''}</p></div>
+  </div>
+
+  <form action="/cart" method="post" class="buy-buttons buy-buttons--compact">
+<a class="button button--secondary" href="/cart">View cart</a>
+<button type="submit" class="button" name="checkout" is="custom-button"><div>Checkout</div><span class="button__loader">
+        <span></span>
+        <span></span>
+        <span></span>
+      </span></button></form>
+</div>`;
+      
+      void drawer.offsetHeight;
+    }
+    
+    if (drawer) {
+      const drawerAny = drawer as any;
+      const openMethods = ['show', 'open', 'showModal', 'reveal', 'display'];
+      let openedViaMethod = false;
+      
+      for (const method of openMethods) {
+        if (typeof drawerAny[method] === 'function') {
+          try {
+            drawerAny[method]();
+            openedViaMethod = true;
+            await waitForAnimations(200);
+            break;
+          } catch (e) {}
+        }
+      }
+      
+      if (!openedViaMethod) {
+        drawer.setAttribute("open", "");
+        drawer.setAttribute("open-from", "bottom");
+        drawer.setAttribute("role", "dialog");
+        drawer.setAttribute("aria-modal", "true");
+        drawer.removeAttribute("hidden");
+        drawer.removeAttribute("aria-hidden");
+      }
+      
+      if (!drawer.classList.contains("show-close-cursor")) {
+        drawer.classList.add("show-close-cursor");
+      }
+      
+      if (drawer instanceof HTMLElement) {
+        drawer.style.cssText = "display: block; left: auto; right: 0px; bottom: 0px; opacity: 1; visibility: visible;";
+        
+        const computed = window.getComputedStyle(drawer);
+        if (computed.position !== "fixed") {
+          drawer.style.position = "fixed";
+        }
+        if (computed.zIndex !== "999") {
+          drawer.style.zIndex = "999";
+        }
+        
+        void drawer.offsetHeight;
+      }
+      
+      await waitForAnimations(500);
+      
+      if (drawer) {
+        await new Promise<void>((resolve) => {
+          let resolved = false;
+          const timeout = setTimeout(() => {
+            if (!resolved) {
+              resolved = true;
+              resolve();
+            }
+          }, 1000);
+          
+          const onTransitionEnd = () => {
+            if (!resolved) {
+              resolved = true;
+              clearTimeout(timeout);
+              drawer?.removeEventListener('transitionend', onTransitionEnd);
+              resolve();
+            }
+          };
+          
+          drawer.addEventListener('transitionend', onTransitionEnd, { once: true });
+        });
+      }
+    }
+
+    await waitForAnimations(300);
+
+    return true;
+  } catch (err) {
+    console.log("[refreshAndOpenImpactCart] Failed", err);
+    return false;
+  }
+}
+
+export async function refreshAndOpenHyperCart(...args: any[]) {
+  const theme = window?.Shopify?.theme;
+  if (!theme || theme.schema_name !== "Hyper") {
+    console.log("[refreshAndOpenHyperCart] Not Hyper theme, skipping");
+    return;
+  }
+
+  try {
+    const cartRes = await fetch("/cart.js", {
+      credentials: "same-origin",
+      cache: "no-cache",
+    });
+    if (!cartRes.ok) {
+      console.log("[refreshAndOpenHyperCart] Failed to fetch cart.js");
+      return false;
+    }
+    const cart = await cartRes.json();
+    const count = cart.item_count || 0;
+
+    const html = document.documentElement;
+    if (count > 0) {
+      html.classList.add("cart-has-items");
+    } else {
+      html.classList.remove("cart-has-items");
+    }
+    
+    const cartCount = document.querySelector("cart-count");
+    if (cartCount) {
+      const currentCount = cartCount.textContent?.trim();
+      if (currentCount !== String(count)) {
+        cartCount.textContent = String(count);
+        cartCount.setAttribute("aria-label", `${count} ${count === 1 ? 'item' : 'items'}`);
+      }
+    }
+    
+    const allCartCounts = document.querySelectorAll("cart-count, [data-cart-count], .cart-count, #cart-count");
+    allCartCounts.forEach(el => {
+      if (el.textContent?.trim() !== String(count)) {
+        el.textContent = String(count);
+        if (el.hasAttribute('aria-label')) {
+          el.setAttribute("aria-label", `${count} ${count === 1 ? 'item' : 'items'}`);
+        }
+      }
+    });
+    
+    const cartLink = document.querySelector('a[href="/cart"]');
+    if (cartLink) {
+      const linkText = cartLink.textContent?.trim() || "";
+      if (linkText.includes("Cart") && !linkText.includes(String(count))) {
+        const newText = linkText.replace(/\d+/, String(count));
+        if (newText !== linkText) {
+          cartLink.textContent = newText;
+        }
+      }
+    }
+
+    triggerCartEvents(cart, count);
+    await waitForAnimations(200);
+    
+    let drawer = document.querySelector("#CartDrawer") || document.querySelector("cart-drawer");
+
+    if (drawer) {
+      if (drawer instanceof HTMLElement) {
+        drawer.setAttribute("hidden", "");
+        drawer.removeAttribute("open");
+        drawer.classList.remove("open");
+        drawer.setAttribute("aria-hidden", "true");
+        drawer.style.display = "none";
+      }
+    }
+
+    const notification = document.querySelector("cart-notification") || 
+                        document.querySelector('[class*="notification"]') ||
+                        document.querySelector('[class*="swiper-notification"]');
+    if (notification && notification instanceof HTMLElement) {
+      notification.removeAttribute("hidden");
+      notification.setAttribute("aria-hidden", "false");
+      notification.style.display = "";
+      notification.style.visibility = "";
+    }
+
+    triggerCartEvents(cart, count);
+    await waitForAnimations(500);
+
+    return true;
+  } catch (err) {
+    console.log("[refreshAndOpenHyperCart] Failed", err);
+    return false;
+  }
+}
+
 export async function refreshCart(variantId: string): Promise<void> {
   const handled = await refreshCartRouter();
   if (handled) return;
