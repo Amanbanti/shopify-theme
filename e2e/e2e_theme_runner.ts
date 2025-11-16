@@ -43,8 +43,10 @@ const FIX_ERROR =
     ?.split("=")[1]
     ?.trim() || "";
 // ---- Fixed inputs ----
-const INPUT_CSV = path.resolve("../fetch_themes/themes.csv"); // columns: name, demo_store_url
-const REFRESH_TS_PATH = path.resolve("refreshCart.ts"); // must export refreshCart or set window.RC.refreshCart
+const INPUT_CSV = path.resolve(__dirname, "../fetch_themes/themes.csv"); // columns: name, demo_store_url
+const REFRESH_TS_PATH = fs.existsSync(path.resolve(__dirname, "../src/refreshCart.ts"))
+  ? path.resolve(__dirname, "../src/refreshCart.ts")
+  : path.resolve(__dirname, "refreshCart.ts"); // must export refreshCart or set window.RC.refreshCart
 const OUT_DIR = path.resolve("out");
 const CONCURRENCY = Number(
   args.find((a) => a.startsWith("--concurrency="))?.split("=")[1] ?? 3,

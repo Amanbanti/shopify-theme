@@ -1,0 +1,29 @@
+# Node dependencies
+node_modules/
+package-lock.json
+yarn.lock
+
+# Puppeteer screenshots / outputs
+e2e/out/
+manual_theme_smoke/out/
+*.png
+
+# ESBuild cache / output
+*.js
+*.map
+*.tsbuildinfo
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Environment variables
+.env
+
+# IDE / OS files
+.vscode/
+.DS_Store
+Thumbs.db

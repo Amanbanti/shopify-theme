@@ -6,9 +6,13 @@
   "author": "",
   "type": "module",
   "main": "index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
+"scripts": {
+  "run": "node --loader ts-node/esm manual_theme_smoke.ts",   
+  "start": "node --loader ts-node/esm manual_theme_smoke.ts", 
+  "test-launch": "node --loader ts-node/esm test-launch.ts",  
+  "test-single": "node --loader ts-node/esm test-single-theme.ts" 
+},
+
   "dependencies": {
     "@eslint/js": "^9.39.1",
     "@types/node": "^24.10.0",
@@ -19,13 +23,14 @@
     "pixelmatch": "^7.1.0",
     "pngjs": "^7.0.0",
     "prettier": "^3.6.2",
-    "puppeteer": "^24.29.1",
     "typescript-eslint": "^8.46.4"
   },
   "devDependencies": {
     "@types/pngjs": "^6.0.5",
     "@typescript-eslint/eslint-plugin": "^8.46.4",
     "@typescript-eslint/parser": "^8.46.4",
+    "puppeteer": "^24.30.0",
+    "ts-node": "^10.9.2",
     "typescript": "^5.9.3"
   }
 }
