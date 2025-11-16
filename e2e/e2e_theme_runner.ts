@@ -42,6 +42,10 @@ const FIX_ERROR =
     .find((a) => a.startsWith("--fix="))
     ?.split("=")[1]
     ?.trim() || "";
+// Threshold for acceptable refresh diff percentage (default 0.0%)
+const THRESHOLD = Number(
+  args.find((a) => a.startsWith("--threshold="))?.split("=")[1] ?? 0,
+);
 // ---- Fixed inputs ----
 const INPUT_CSV = path.resolve(__dirname, "../fetch_themes/themes.csv"); // columns: name, demo_store_url
 const REFRESH_TS_PATH = fs.existsSync(path.resolve(__dirname, "../src/refreshCart.ts"))
@@ -778,23 +782,45 @@ await gotoWithRetry(page, productUrl, `product reload ${tag}`);
     row.manual_add_ok = manualOk ? 1 : 0;
     await waitForSettle(page, 2_000);
     // 11) run refresh cart, wait a little
-    await page.addScriptTag({ content: refreshBundleCode }); // works with CSP bypass. :contentReference[oaicite:6]{index=6}
-    const refreshed = await page.evaluate(async (variantId: string | number | null) => {
-      const g: any = window as any;
+    let refreshed = false;
+    for (let attempt = 0; attempt < 2 && !refreshed; attempt++) {
       try {
-        if (typeof g.refreshCart === "function") {
-          await g.refreshCart(variantId);
-          return true;
+        await page.addScriptTag({ content: refreshBundleCode });
+        refreshed = await page.evaluate(async (vid: string | number | null) => {
+          const g: any = window as any;
+          try {
+            if (typeof g.refreshCart === "function") {
+              await g.refreshCart(vid);
+              return true;
+            }
+            if (g.RC && typeof g.RC.refreshCart === "function") {
+              await g.RC.refreshCart(vid);
+              return true;
+            }
+          } catch (e) {
+            console.error("refresh invocation error", e);
+          }
+          return false;
+        }, variantId);
+      } catch (e: any) {
+        const msg = String(e?.message || e || "");
+        if (
+          msg.includes("Execution context was destroyed") ||
+          msg.includes("Cannot find context") ||
+          msg.includes("Target closed")
+        ) {
+          // page likely navigated; mark and retry once after navigation settles
+          row.error = (row.error ? row.error + ";" : "") + "context_destroyed";
+          try {
+            await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 10_000 });
+          } catch {}
+          continue;
         }
-        if (g.RC && typeof g.RC.refreshCart === "function") {
-          await g.RC.refreshCart(variantId);
-          return true;
-        }
-      } catch(e) {
-          console.error(e)
+        // other error: stop retrying
+        row.error = (row.error ? row.error + ";" : "") + "refresh_invoke_failed";
+        break;
       }
-      return false;
-    }, variantId);
+    }
     row.refresh_ok = refreshed ? 1 : 0;
 
     await new Promise((r) => setTimeout(r, 5_000));
@@ -812,11 +838,12 @@ await gotoWithRetry(page, productUrl, `product reload ${tag}`);
         refreshDiffPath,
       );
       row.refresh_diff_png = path.relative(OUT_DIR, refreshDiffPath);
-      row.refresh_change_pct = Number(diff.pct.toFixed(4));
-      if (diff.pixels > 0) {
+      const pct = Number(diff.pct.toFixed(4));
+      row.refresh_change_pct = pct;
+      if (pct > THRESHOLD) {
         row.result = "NO-PASS";
         row.error =
-          (row.error ? row.error + ";" : "") + "refresh_nonzero_change";
+          (row.error ? row.error + ";" : "") + `refresh_above_threshold(${THRESHOLD})`;
       } else {
         row.result = "PASS";
       }
