@@ -34,51 +34,6 @@ function sanitizeName(n: string) {
   return String(n || "unknown").toLowerCase().replace(/[^a-z0-9_-]+/g, "-").slice(0, 80);
 }
 
-async function diffPng(
-  beforePath: string,
-  afterPath: string,
-  outPath: string,
-): Promise<{ pct: number; pixels: number; width: number; height: number }> {
-  const a = PNG.sync.read(fs.readFileSync(beforePath));
-  const b = PNG.sync.read(fs.readFileSync(afterPath));
-  const width = Math.min(a.width, b.width);
-  const height = Math.min(a.height, b.height);
-
-  const crop = (src: PNG): PNG => {
-    if (src.width === width && src.height === height) return src;
-    const out = new PNG({ width, height });
-    PNG.bitblt(src, out, 0, 0, width, height, 0, 0);
-    return out;
-  };
-  const imgA = crop(a);
-  const imgB = crop(b);
-  const diff = new PNG({ width, height });
-  const n = pixelmatch(imgA.data, imgB.data, diff.data, width, height, { threshold: 0.1 });
-  fs.writeFileSync(outPath, PNG.sync.write(diff));
-  const pct = (n / (width * height)) * 100;
-  return { pct, pixels: n, width, height };
-}
-
-function csvEscape(v: unknown): string {
-  if (v === null || v === undefined) return "";
-  const s = String(v);
-  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-}
-
-// Preload CLS measurement inside page
-function preloadCLS() {
-  try {
-    (window as any).__CLS = 0;
-    (window as any).__clsReset = () => ((window as any).__CLS = 0);
-    new PerformanceObserver((list) => {
-      for (const e of list.getEntries()) {
-        // @ts-ignore
-        if (!e.hadRecentInput) (window as any).__CLS += (e as any).value;
-      }
-    }).observe({ type: "layout-shift", buffered: true });
-  } catch {}
-}
-
 async function gotoWithRetry(page: Page, url: string, label: string, maxAttempts = 4) {
   let lastErr: unknown;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -206,14 +161,32 @@ async function getCartClip(page: Page): Promise<ScreenshotOptions["clip"] | unde
   return undefined;
 }
 
+async function safeScreenshot(page: Page, opts: any, retries = 2) {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      if (opts?.clip) {
+        const c = opts.clip;
+        if (!c || !c.width || !c.height) {
+          const { clip, ...rest } = opts;
+          opts = { ...rest, fullPage: false };
+        }
+      }
+      return await page.screenshot(opts);
+    } catch (e) {
+      if (attempt >= retries) throw e;
+      try { await page.setViewport({ width: 1366, height: 900 }); } catch {}
+      try { await page.evaluate(() => window.scrollTo(0, 0)); } catch {}
+      await new Promise((r) => setTimeout(r, 400));
+      const { clip, ...rest } = opts || {};
+      opts = { ...rest, fullPage: false };
+    }
+  }
+}
+
 async function captureCartScreenshot(page: Page, filePath: string) {
   await disableAnimations(page);
   const clip = await getCartClip(page);
-  if (clip) {
-    await page.screenshot({ path: filePath as any, clip, captureBeyondViewport: false });
-  } else {
-    await page.screenshot({ path: filePath as any, fullPage: false });
-  }
+  await safeScreenshot(page, { path: filePath as any, clip, captureBeyondViewport: false });
 }
 
 async function waitForNetworkIdle(page: Page, timeout = 10_000) {
@@ -224,6 +197,31 @@ async function waitForNetworkIdle(page: Page, timeout = 10_000) {
   await new Promise((r) => setTimeout(r, 1200));
 }
 
+async function diffPng(
+  beforePath: string,
+  afterPath: string,
+  outPath: string,
+): Promise<{ pct: number; pixels: number; width: number; height: number }> {
+  const a = PNG.sync.read(fs.readFileSync(beforePath));
+  const b = PNG.sync.read(fs.readFileSync(afterPath));
+  const width = Math.min(a.width, b.width);
+  const height = Math.min(a.height, b.height);
+
+  const crop = (src: PNG): PNG => {
+    if (src.width === width && src.height === height) return src;
+    const out = new PNG({ width, height });
+    PNG.bitblt(src, out, 0, 0, width, height, 0, 0);
+    return out;
+  };
+  const imgA = crop(a);
+  const imgB = crop(b);
+  const diff = new PNG({ width, height });
+  const n = pixelmatch(imgA.data, imgB.data, diff.data, width, height, { threshold: 0.1 });
+  fs.writeFileSync(outPath, PNG.sync.write(diff));
+  const pct = (n / (width * height)) * 100;
+  return { pct, pixels: n, width, height };
+}
+
 // ----- Themes list -----
 // Replace these product URLs with actual products from each theme demo store
 const themes = [
@@ -232,13 +230,27 @@ const themes = [
   { name: "Balance", url: "https://impact-theme-shape.myshopify.com/products/infinity-bra-navy-blue", refreshFn: "refreshCartBalance" },
   { name: "Pillar", url: "https://hyper-pillar.myshopify.com/products/breezy-sock", refreshFn: "refreshCartPillar" },
   { name: "Flora", url: "https://grid-theme-light.myshopify.com/collections/clearance/products/finn-jumpsuit-poppy?variant=32029844832330", refreshFn: "refreshCartFlora" },
-  { name: "Jellybean", url: "https://uplift-theme-myshopify.com/products/beanie-lion", refreshFn: "refreshCartJellybean" },
-];
+  { name: "Jellybean", url: "https://uplift-theme.myshopify.com/products/giant-lego-bricks", refreshFn: "refreshCartJellybean" },
+];                       
+
+// Preload CLS measurement inside page
+function preloadCLS() {
+  try {
+    (window as any).__CLS = 0;
+    (window as any).__clsReset = () => ((window as any).__CLS = 0);
+    new PerformanceObserver((list) => {
+      for (const e of list.getEntries()) {
+        // @ts-ignore
+        if (!e.hadRecentInput) (window as any).__CLS += (e as any).value;
+      }
+    }).observe({ type: "layout-shift", buffered: true });
+  } catch {}
+}
 
 (async () => {
   const outRoot = path.join(__dirname, "out");
   fs.mkdirSync(outRoot, { recursive: true });
-  const resultsCsv = path.join(outRoot, "results_smoke.csv");
+  const resultsCsv = path.join(outRoot, "results.csv");
   if (!fs.existsSync(resultsCsv)) {
     fs.writeFileSync(
       resultsCsv,
@@ -265,17 +277,14 @@ const themes = [
   const refreshBundle = await compileRefreshBundle();
 
   const browser = await puppeteer.launch({ headless: false });
-  const page = await browser.newPage();
-  await page.setBypassCSP(true);
-  await page.evaluateOnNewDocument(preloadCLS);
-  page.setDefaultNavigationTimeout(90_000);
-
-  // auto-dismiss alert dialogs (some themes use alert())
-  page.on("dialog", async (d) => {
-    try { await d.dismiss(); } catch {}
-  });
 
   for (const theme of themes) {
+    const page = await browser.newPage();
+    await page.setBypassCSP(true);
+    await page.evaluateOnNewDocument(preloadCLS);
+    await page.setViewport({ width: 1366, height: 900 });
+    page.setDefaultNavigationTimeout(90_000);
+    page.on("dialog", async (d) => { try { await d.dismiss(); } catch {} });
     const tag = sanitizeName(theme.name);
     const folder = path.join(outRoot, tag);
     if (!fs.existsSync(folder)) fs.mkdirSync(folder, { recursive: true });
@@ -296,7 +305,19 @@ const themes = [
 
     try {
       console.log(`\n=== Testing theme: ${theme.name} ===`);
-      await gotoWithRetry(page, theme.url, theme.name);
+      try {
+        await gotoWithRetry(page, theme.url, theme.name);
+        await page.waitForSelector('body', { timeout: 15000 }).catch(() => {});
+        await new Promise(r => setTimeout(r, 300));
+      } catch (e) {
+        status = "ERROR";
+        errMsg = String((e as any)?.message || e);
+        const row = [theme.name, "", theme.url, "", "", "", "", status, errMsg, preClickPng, postClickPng, postRefreshPng, baseDiffPng, refreshDiffPng].map((v) => String(v)).join(",") + "\n";
+        fs.appendFileSync(resultsCsv, row, "utf8");
+        console.log(`Result: ${status} | base=n/a | refresh=n/a | schema=`);
+        try { await page.close(); } catch {}
+        continue;
+      }
 
       // capture schema name & baseline DOM state
       schemaName = (await page.evaluate(() => (window as any).Shopify?.theme?.schema_name || (window as any).Shopify?.theme?.name || "")) as string;
@@ -334,12 +355,88 @@ const themes = [
       }
 
       // Extract variant ID (URL ?variant= fallback → form input)
-      const variantId = await page.evaluate(() => {
+      let variantId = await page.evaluate(() => {
         const urlVar = new URLSearchParams(location.search).get("variant");
         if (urlVar) return urlVar;
         const input = document.querySelector('form[action*="/cart/add"] input[name="id"]') as HTMLInputElement | null;
         return input?.value || null;
       });
+      if (!variantId) {
+        // Fallback: fetch first available variant from product JSON
+        try {
+          variantId = await page.evaluate(async () => {
+            try {
+              const m = location.pathname.match(/\/products\/([^/?#]+)/);
+              const handle = m && m[1] ? m[1] : null;
+              if (!handle) return null;
+              const res = await fetch(`/products/${handle}.js`, { credentials: "same-origin", cache: "no-cache" });
+              if (!res.ok) return null;
+              const data: any = await res.json();
+              const v = (data?.variants || []).find((x: any) => x && (x.available === true || x.available === 1));
+              return v ? String(v.id) : null;
+            } catch { return null; }
+          });
+        } catch {}
+      }
+      if (!variantId) {
+        // Last resort: find another product with available variant and navigate to it
+        try {
+          const newUrl = await page.evaluate(async () => {
+            try {
+              const list = await fetch(`/products.json?limit=48`, { credentials: "same-origin", cache: "no-cache" }).then(r => r.json()).catch(() => null) as any;
+              const products: any[] = (list && list.products) || [];
+              for (const p of products) {
+                const v = (p?.variants || []).find((x: any) => x && (x.available === true || x.available === 1));
+                if (v && p?.handle) {
+                  return `${location.origin}/products/${p.handle}`;
+                }
+              }
+            } catch {}
+            return null;
+          });
+          let candidateUrl: string | null = newUrl;
+          if (!candidateUrl) {
+            // Scrape a product link from the page if /products.json is blocked
+            candidateUrl = await page.evaluate(() => {
+              const anchors = Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href*="/products/"]'));
+              for (const a of anchors) {
+                if (a.href && a.href.indexOf("/products/") !== -1) {
+                  return a.href;
+                }
+              }
+              return null;
+            });
+          }
+          if (candidateUrl) {
+            await gotoWithRetry(page, candidateUrl, `${theme.name}-fallback`);
+            await page.waitForSelector('body', { timeout: 15000 }).catch(() => {});
+            await new Promise(r => setTimeout(r, 300));
+            // try again on the new product page
+            variantId = await page.evaluate(() => {
+              const urlVar = new URLSearchParams(location.search).get("variant");
+              if (urlVar) return urlVar;
+              const input = document.querySelector('form[action*="/cart/add"] input[name="id"]') as HTMLInputElement | null;
+              return input?.value || null;
+            });
+            if (!variantId) {
+              try {
+                variantId = await page.evaluate(async () => {
+                  try {
+                    const m = location.pathname.match(/\/products\/([^/?#]+)/);
+                    const handle = m && m[1] ? m[1] : null;
+                    if (!handle) return null;
+                    const res = await fetch(`/products/${handle}.js`, { credentials: "same-origin", cache: "no-cache" });
+                    if (!res.ok) return null;
+                    const data: any = await res.json();
+                    const v = (data?.variants || []).find((x: any) => x && (x.available === true || x.available === 1));
+                    return v ? String(v.id) : null;
+                  } catch { return null; }
+                });
+              } catch {}
+            }
+          }
+        } catch {}
+      }
 
       // Manual /cart/add.js + refresh
       if (variantId) {
@@ -440,8 +537,80 @@ const themes = [
           errMsg = (errMsg ? errMsg + ";" : "") + reason;
         }
       } else {
-        status = "NO-PASS";
+        // No variant available: still try to invoke refreshCart to validate DOM/UI change
         errMsg = (errMsg ? errMsg + ";" : "") + "no_variant_available";
+        const domBeforeRefresh = await captureCartDOMState(page);
+        let invoked = false;
+        let invokeError = "";
+        for (let attempt = 0; attempt < 2 && !invoked; attempt++) {
+          try {
+            await page.addScriptTag({ content: refreshBundle });
+            invoked = await page.evaluate(async (fnName) => {
+              const g: any = window as any;
+              const schema = (g.Shopify?.theme?.schema_name || g.Shopify?.theme?.name || "").toLowerCase().trim();
+              const key = (schema || "").replace(/[^a-z0-9]+/g, "");
+              try {
+                if (g.refreshCart && typeof g.refreshCart === "object" && key && typeof g.refreshCart[key] === "function") {
+                  await g.refreshCart[key]();
+                  return true;
+                }
+                if (typeof (g as any)[fnName] === "function") {
+                  await (g as any)[fnName]();
+                  return true;
+                }
+                if (g.RC && typeof g.RC.refreshCart === "function") {
+                  await g.RC.refreshCart(key);
+                  return true;
+                }
+                if (typeof g.refreshCart === "function") {
+                  await g.refreshCart(key);
+                  return true;
+                }
+              } catch (e) {
+                console.error("refresh invocation failed", e);
+              }
+              return false;
+            }, theme.refreshFn);
+          } catch (e: any) {
+            const msg = String(e?.message || e || "");
+            invokeError = msg;
+            if (msg.includes("Execution context was destroyed") || msg.includes("Target closed")) {
+              try { await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 15_000 }); } catch {}
+              continue;
+            }
+            break;
+          }
+        }
+        await waitForNetworkIdle(page, 10_000);
+        await new Promise((r) => setTimeout(r, 600));
+        await captureCartScreenshot(page, postRefreshPng);
+        clsAfterManual = (await page.evaluate("window.__CLS || 0")) as number;
+        try {
+          const r = await diffPng(postClickPng, postRefreshPng, refreshDiffPng);
+          refreshPct = Number(r.pct.toFixed(4));
+        } catch (e: any) {
+          errMsg = (errMsg ? errMsg + ";" : "") + `refresh_diff_failed:${e?.message || e}`;
+        }
+        const domAfterRefresh = await captureCartDOMState(page);
+        const domDelta = compareCartState(domBeforeRefresh, domAfterRefresh);
+        const passByDom = domDelta.changed;
+        const passByPixels = Number.isFinite(refreshPct) && refreshPct > PIXEL_THRESHOLD;
+        if (passByDom || passByPixels) {
+          status = "PASS";
+          const reason = [
+            passByDom ? `DOM: ${domDelta.reasons.join("; ")}` : "",
+            passByPixels ? `PIXELS>${PIXEL_THRESHOLD}% (${refreshPct}%)` : "",
+          ].filter(Boolean).join(" | ");
+          console.log(`[${theme.name}] PASS reason → ${reason}`);
+        } else {
+          status = "NO-PASS";
+          const reason = [
+            `PIXELS=${Number.isFinite(refreshPct) ? refreshPct + "%" : "n/a"} ≤ ${PIXEL_THRESHOLD}%`,
+            domDelta.reasons.length ? `DOM(no decisive change)` : "DOM(no change)",
+            invokeError ? `invoke:${invokeError}` : "",
+          ].filter(Boolean).join(" | ");
+          errMsg = (errMsg ? errMsg + ";" : "") + reason;
+        }
       }
 
       // If base diff is 0, note it (but we keep PASS if DOM says success)
@@ -469,15 +638,17 @@ const themes = [
       postRefreshPng,
       baseDiffPng,
       refreshDiffPng,
-    ].map(csvEscape).join(",") + "\n";
+    ].map((v) => String(v)).join(",") + "\n";
 
     fs.appendFileSync(resultsCsv, row, "utf8");
 
     console.log(
       `Result: ${status} | base=${Number.isFinite(basePct) ? basePct.toFixed(2) + '%' : 'n/a'} | refresh=${Number.isFinite(refreshPct) ? refreshPct.toFixed(2) + '%' : 'n/a'} | schema=${schemaName}`,
     );
+
+    try { await page.close(); } catch {}
   }
 
   await browser.close();
-  console.log("\n=== Smoke run complete. See e2e/out/results_smoke.csv ===");
+  console.log("\n=== Smoke run complete. See e2e/out/results.csv ===");
 })();

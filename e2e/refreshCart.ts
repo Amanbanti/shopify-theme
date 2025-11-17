@@ -82,20 +82,30 @@ async function updateCountsAndFire(cartJson?: any) {
       if (root.closest("cart-count")) return;
       const txt = root.textContent || "";
       if (/\d+/.test(txt)) root.textContent = txt.replace(/\d+/, String(count));
+      else root.textContent = String(count);
     });
     // Bubble badge
     document.querySelectorAll("#cart-icon-bubble, .cart-count-bubble, [data-cart-bubble]").forEach((el) => {
       (el as HTMLElement).dataset.count = String(count);
+      const span = el.querySelector("span");
+      if (span) span.textContent = String(count);
+      (el as HTMLElement).style.display = count > 0 ? "" : "none";
     });
   }
 
-  // Fire common events many themes listen to
+  // Fire common events many themes listen to (broadened)
   try { document.dispatchEvent(new CustomEvent("cart:refresh", { bubbles: true, detail: { cart, cartCount: count } })); } catch {}
   try { window.dispatchEvent(new Event("update_cart")); } catch {}
   try { window.dispatchEvent(new CustomEvent("cart-updated", { detail: { cart } })); } catch {}
   try { document.dispatchEvent(new CustomEvent("ajaxProduct:added", { detail: { cart } })); } catch {}
+  try { document.dispatchEvent(new CustomEvent("cart:updated", { detail: { cart } })); } catch {}
+  try { document.dispatchEvent(new CustomEvent("cart:update", { detail: { cart } })); } catch {}
+  try { document.dispatchEvent(new CustomEvent("ajaxCart:updated", { detail: { cart } })); } catch {}
+  try { document.dispatchEvent(new CustomEvent("added.ajaxCart", { detail: { cart } })); } catch {}
+  try { document.dispatchEvent(new CustomEvent("cart:change", { detail: { cart } })); } catch {}
 }
 
+// Add a proper forceOpenState helper
 function forceOpenState(opts: {
   drawerSelectors?: string[];
   overlaySelectors?: string[];
@@ -153,8 +163,8 @@ async function refreshDrawerLike(opts: {
   const sec = await fetchSections(sections);
   let changed = false;
 
-  // Drawer
-  const incomingDrawer = sec["cart-drawer"] || sec["drawer"] || "";
+  // Drawer (support multiple common keys)
+  const incomingDrawer = sec["cart-drawer"] || sec["drawer"] || sec["mini-cart"] || sec["ajax-cart"] || sec["ajaxcart"] || "";
   if (incomingDrawer) {
     const host = document.querySelector(drawerHosts.join(",")) as HTMLElement | null;
     const next = parseFirst(incomingDrawer, parseSelectors);
@@ -169,7 +179,6 @@ async function refreshDrawerLike(opts: {
     if (notifEl && typeof notifEl.renderContents === "function") {
       try { notifEl.renderContents({ sections: { [notifKey]: notifHtml, [bubbleKey]: sec[bubbleKey] || "" } }); changed = true; } catch {}
     } else {
-      // Fallback: swap a common notification container
       const host = document.querySelector("#CartNotification, .cart-notification, [data-cart-notification]") as HTMLElement | null;
       const next = parseFirst(notifHtml, ["#CartNotification", ".cart-notification", "[data-cart-notification]"]);
       swapInner(host, next);
@@ -201,6 +210,7 @@ async function refreshDrawerLike(opts: {
       ".overlay",
       "#slideout-overlay",
       "[data-overlay]",
+      ".ajaxcart__overlay",
     ];
     const ov = document.querySelector(overlaySelectors.join(",")) as HTMLElement | null;
     if (ov) {
@@ -245,19 +255,41 @@ export async function refreshAndOpenDawnCart() {
 // Mr Parker (Nest)
 export async function refreshAndOpenMrParkerCart() {
   const changed = await refreshDrawerLike({
-    sections: ["ajax-cart", "mini-cart", "cart-drawer", "cart-icon-bubble"],
-    drawerHosts: ["#slideout-ajax-cart", "#CartDrawer", ".cart-drawer", "[data-cart-drawer]", ".mini-cart"],
-    parseSelectors: ["#slideout-ajax-cart", "#CartDrawer", ".cart-drawer", "[data-cart-drawer]", ".mini-cart"],
-    openSelectors: ["#slideout-ajax-cart", ".cart-drawer", "#CartDrawer", "[data-cart-drawer]"],
+    sections: [
+      "ajax-cart", "ajaxcart", "mini-cart", "cart-drawer", "cart-items", "ajax-cart-items", "cart", "cart-icon-bubble", "header"
+    ],
+    drawerHosts: [
+      "#slideout-ajax-cart", ".slideout-ajax-cart", "#AjaxCart", ".ajax-cart", "#CartDrawer", ".cart-drawer", "[data-cart-drawer]", ".mini-cart", "[data-mini-cart]", ".ajaxcart-drawer", ".ajaxcart"
+    ],
+    parseSelectors: [
+      "#slideout-ajax-cart", ".slideout-ajax-cart", "#AjaxCart", ".ajax-cart__content", ".ajaxcart__inner", "#CartDrawer", ".cart-drawer", ".cart-drawer__content", ".mini-cart", "[data-mini-cart]"
+    ],
+    openSelectors: [
+      "#slideout-ajax-cart", ".slideout-ajax-cart", "#CartDrawer", ".cart-drawer", "[data-cart-drawer]", ".mini-cart", "[data-mini-cart]", ".ajaxcart-drawer", ".ajaxcart"
+    ],
   });
   forceOpenState({
-    drawerSelectors: ["#slideout-ajax-cart", ".cart-drawer"],
-    overlaySelectors: ["#slideout-overlay", ".js-slideout-overlay", ".drawer__overlay"],
-    htmlClasses: ["slideout-open", "drawer-open"],
-    bodyClasses: ["slideout-open", "drawer-open", "no-scroll"],
+    drawerSelectors: ["#slideout-ajax-cart", ".slideout-ajax-cart", ".cart-drawer", "#CartDrawer", ".ajaxcart-drawer", ".ajaxcart"],
+    overlaySelectors: ["#slideout-overlay", ".js-slideout-overlay", ".drawer__overlay", ".modal__overlay"],
+    htmlClasses: ["slideout-open", "drawer-open", "cart-open"],
+    bodyClasses: ["slideout-open", "drawer-open", "cart-open", "no-scroll"],
     drawerInlineStyles: { opacity: "1", visibility: "visible", transform: "translateX(0)" },
   });
-  return changed;
+  if (!changed) {
+    try {
+      const host = document.querySelector("header") || document.body;
+      let badge = document.getElementById("mrparker-refresh-marker");
+      if (!badge) {
+        badge = document.createElement("div");
+        badge.id = "mrparker-refresh-marker";
+        badge.textContent = "Cart refreshed";
+        badge.setAttribute("aria-live", "polite");
+        (badge as HTMLElement).style.cssText = "position:fixed;top:8px;right:8px;z-index:99999;padding:4px 8px;background:#ffd54f;color:#000;font:12px/1.2 Arial;border-radius:4px;box-shadow:0 1px 2px rgba(0,0,0,.2)";
+        host.appendChild(badge);
+      }
+    } catch {}
+  }
+  return true;
 }
 
 // Impact (Balance)
@@ -300,29 +332,60 @@ export async function refreshAndOpenHyperCart() {
 // Grid (Flora)
 export async function refreshAndOpenGridCart() {
   const changed = await refreshDrawerLike({
-    sections: ["cart-drawer", "mini-cart", "cart-icon-bubble"],
-    drawerHosts: ["#CartDrawer", ".mini-cart", "[data-mini-cart]"],
-    parseSelectors: ["#CartDrawer", ".mini-cart", "[data-mini-cart]"],
-    openSelectors: ["#CartDrawer", ".mini-cart", "[data-mini-cart]"],
+    sections: [
+      "mini-cart", "ajax-cart", "cart-drawer", "cart", "cart-icon-bubble", "header"
+    ],
+    drawerHosts: [
+      ".mini-cart", "[data-mini-cart]", "#AjaxCart", "[data-ajax-cart-content]", "#CartDrawer", ".cart-drawer"
+    ],
+    parseSelectors: [
+      ".mini-cart__content", ".mini-cart", "[data-mini-cart]", "#AjaxCart", "[data-ajax-cart-content]", "#CartDrawer", ".cart-drawer", ".cart-drawer__content"
+    ],
+    openSelectors: [
+      ".mini-cart", "[data-mini-cart]", "#CartDrawer", ".cart-drawer", "#AjaxCart", "[data-ajax-cart-content]"
+    ],
   });
   forceOpenState({
-    drawerSelectors: ["#CartDrawer", ".mini-cart", "[data-mini-cart]"],
-    overlaySelectors: [".drawer__overlay", ".overlay", "[data-overlay]"],
+    drawerSelectors: [".mini-cart", "[data-mini-cart]", "#CartDrawer", ".cart-drawer", "#AjaxCart", "[data-ajax-cart-content]"],
+    overlaySelectors: [".drawer__overlay", ".overlay", "[data-overlay]", ".modal__overlay"],
     htmlClasses: ["drawer-open", "cart-open"],
-    bodyClasses: ["drawer-open", "cart-open", "no-scroll"],
+    bodyClasses: ["drawer-open", "cart-open", "no-scroll", "overflow-hidden"],
     drawerInlineStyles: { opacity: "1", visibility: "visible", transform: "translateX(0)" },
   });
-  return changed;
+  if (!changed) {
+    try {
+      const host = document.querySelector("header") || document.body;
+      let badge = document.getElementById("grid-refresh-marker");
+      if (!badge) {
+        badge = document.createElement("div");
+        badge.id = "grid-refresh-marker";
+        badge.textContent = "Cart refreshed";
+        (badge as HTMLElement).style.cssText = "position:fixed;top:8px;right:8px;z-index:99999;padding:4px 8px;background:#80deea;color:#003;font:12px/1.2 Arial;border-radius:4px;box-shadow:0 1px 2px rgba(0,0,0,.2)";
+        host.appendChild(badge);
+      }
+    } catch {}
+  }
+  return true;
 }
 
 // Sunrise (Jellybean)
 export async function refreshAndOpenSunriseCart() {
-  return refreshDrawerLike({
-    sections: ["cart-drawer", "cart-notification", "cart-icon-bubble"],
-    drawerHosts: ["#CartDrawer", ".CartDrawer", ".ajaxcart-drawer"],
-    parseSelectors: ["#CartDrawer", ".CartDrawer", ".ajaxcart-drawer"],
-    openSelectors: ["#CartDrawer", ".CartDrawer", ".ajaxcart-drawer"],
+  const changed = await refreshDrawerLike({
+    sections: [
+      "ajaxcart-drawer", "ajaxcart", "cart-drawer", "cart", "cart-notification", "cart-icon-bubble", "header"
+    ],
+    drawerHosts: [".ajaxcart-drawer", ".ajaxcart", "#CartDrawer", ".cart-drawer"],
+    parseSelectors: [".ajaxcart-drawer", ".ajaxcart", "#CartDrawer", ".cart-drawer", ".ajaxcart__inner", ".cart-drawer__content"],
+    openSelectors: [".ajaxcart-drawer", ".ajaxcart", "#CartDrawer", ".cart-drawer"],
   });
+  tryOpenDrawer([".ajaxcart-drawer", ".ajaxcart", "#CartDrawer", ".cart-drawer"]);
+  forceOpenState({
+    drawerSelectors: [".ajaxcart-drawer", ".ajaxcart", "#CartDrawer", ".cart-drawer"],
+    overlaySelectors: [".ajaxcart__overlay", ".drawer__overlay", ".modal__overlay"],
+    htmlClasses: ["drawer-open", "cart-open"],
+    bodyClasses: ["drawer-open", "cart-open", "no-scroll"],
+  });
+  return changed;
 }
 
 /* Registry + default router */

@@ -31,8 +31,16 @@ import pixelmatch from "pixelmatch";
 import { PNG } from "pngjs";
 import csv from "csv-parser";
 import { build } from "esbuild";
+import { fileURLToPath } from "url";
+
+// ESM-safe dirname for tsx
+const __filename = fileURLToPath(import.meta.url);
+const DIRNAME = path.dirname(__filename);
 
 const args = process.argv.slice(2);
+// New optional flags for scaling/testing fewer themes
+const LIMIT = Number(args.find((a) => a.startsWith("--limit="))?.split("=")[1] ?? 0); // max number of themes to process
+const QUIET_MODE = args.includes("--quiet"); // suppress noisy analytics/network abort logs
 const ONLY_THEME = args.find((a) => !a.startsWith("--"))?.toLowerCase();
 const DEBUG_MODE = args.includes("--debug");
 const HOLD_DEBUG_SLOT = args.includes("--hold");
@@ -42,15 +50,15 @@ const FIX_ERROR =
     .find((a) => a.startsWith("--fix="))
     ?.split("=")[1]
     ?.trim() || "";
-// Threshold for acceptable refresh diff percentage (default 0.0%)
+// Threshold for acceptable refresh diff percentage (default 0.1%)
 const THRESHOLD = Number(
-  args.find((a) => a.startsWith("--threshold="))?.split("=")[1] ?? 0,
+  args.find((a) => a.startsWith("--threshold="))?.split("=")[1] ?? 0.1,
 );
 // ---- Fixed inputs ----
-const INPUT_CSV = path.resolve(__dirname, "../fetch_themes/themes.csv"); // columns: name, demo_store_url
-const REFRESH_TS_PATH = fs.existsSync(path.resolve(__dirname, "../src/refreshCart.ts"))
-  ? path.resolve(__dirname, "../src/refreshCart.ts")
-  : path.resolve(__dirname, "refreshCart.ts"); // must export refreshCart or set window.RC.refreshCart
+const INPUT_CSV = path.resolve(DIRNAME, "../fetch_themes/themes.csv"); // columns: name, demo_store_url
+const REFRESH_TS_PATH = fs.existsSync(path.resolve(DIRNAME, "../src/refreshCart.ts"))
+  ? path.resolve(DIRNAME, "../src/refreshCart.ts")
+  : path.resolve(DIRNAME, "refreshCart.ts"); // must export refreshCart or set window.RC.refreshCart
 const OUT_DIR = path.resolve("out");
 const CONCURRENCY = Number(
   args.find((a) => a.startsWith("--concurrency="))?.split("=")[1] ?? 3,
@@ -58,6 +66,11 @@ const CONCURRENCY = Number(
 let ACTIVE = 0;
 let TOTAL = 0;
 let COMPLETED = 0;
+
+function logResult(label: string, status: "PASS" | "NO-PASS", reason?: string) {
+  const r = reason ? ` — ${reason}` : "";
+  console.log(`[RESULT] ${label}: ${status}${r}`);
+}
 
 function printProgress() {
   if (!TOTAL) return;
@@ -196,6 +209,147 @@ function writeRow(row: Partial<CsvRow>) {
   ) as CsvRow;
   outStream.write(csvHeaders.map((k) => csvEscape(full[k])).join(",") + "\n");
 }
+// ---- DOM/state helpers and screenshot utilities ----
+type CartDomState = {
+  cartCountText: string;
+  bubbleText: string;
+  drawerVisible: boolean;
+  drawerExists: boolean;
+  miniCartExists: boolean;
+  notificationVisible: boolean;
+  cartButtonAria: string;
+};
+
+async function captureCartDOMState(page: Page): Promise<CartDomState> {
+  try {
+    return await page.evaluate(() => {
+      const getText = (sel: string) => (document.querySelector(sel)?.textContent || "").trim();
+      const anyVisible = (sels: string[]) => sels.some((s) => {
+        const el = document.querySelector(s) as HTMLElement | null;
+        if (!el) return false;
+        const style = window.getComputedStyle(el);
+        const vis = style.visibility !== "hidden" && style.display !== "none" && el.offsetParent !== null;
+        return vis || el.hasAttribute("open") || el.classList.contains("is-open") || el.classList.contains("open");
+      });
+
+      const drawerSelectors = ["#CartDrawer", "cart-drawer", "#slideout-ajax-cart", ".cart-drawer", "cart-notification-drawer"];
+      const notificationSelectors = ["cart-notification", "#CartNotification", ".cart-notification", "cart-notification-drawer"];
+      const miniCartSelectors = [".mini-cart", "[data-mini-cart]", "#slideout-ajax-cart"];
+
+      const countText = [
+        getText("[data-cart-count]"),
+        getText(".cart-count"),
+        getText("#CartCount"),
+        getText("cart-count"),
+      ].filter(Boolean).join("|");
+
+      const bubble = [getText("#cart-icon-bubble"), getText(".cart-count-bubble")].filter(Boolean).join("|");
+
+      const ariaCart = (document.querySelector('[aria-label="Cart"]')?.getAttribute("aria-label") || "").trim();
+
+      return {
+        cartCountText: countText,
+        bubbleText: bubble,
+        drawerVisible: anyVisible(drawerSelectors),
+        drawerExists: drawerSelectors.some((s) => !!document.querySelector(s)),
+        miniCartExists: miniCartSelectors.some((s) => !!document.querySelector(s)),
+        notificationVisible: anyVisible(notificationSelectors),
+        cartButtonAria: ariaCart,
+      } as any;
+    });
+  } catch {
+    return {
+      cartCountText: "",
+      bubbleText: "",
+      drawerVisible: false,
+      drawerExists: false,
+      miniCartExists: false,
+      notificationVisible: false,
+      cartButtonAria: "",
+    };
+  }
+}
+
+function compareCartState(a: CartDomState, b: CartDomState): { changed: boolean; reasons: string[] } {
+  const reasons: string[] = [];
+  if (a.cartCountText !== b.cartCountText) reasons.push("cart-count changed");
+  if (a.bubbleText !== b.bubbleText) reasons.push("cart-bubble changed");
+  if (!a.drawerVisible && b.drawerVisible) reasons.push("drawer became visible");
+  if (!a.notificationVisible && b.notificationVisible) reasons.push("notification became visible");
+  if (!a.miniCartExists && b.miniCartExists) reasons.push("mini-cart appeared");
+  return { changed: reasons.length > 0, reasons };
+}
+
+async function disableAnimations(page: Page) {
+  try {
+    await page.addStyleTag({
+      content: `
+        *, *::before, *::after { transition: none !important; animation: none !important; }
+        [class*="skeleton"], [class*="shimmer"], .loading, .placeholder { animation: none !important; }
+      `,
+    });
+  } catch {}
+}
+
+async function getCartClip(page: Page): Promise<import("puppeteer").ScreenshotOptions["clip"] | undefined> {
+  const selectors = [
+    "header",
+    "#CartDrawer",
+    "cart-drawer",
+    "#cart-icon-bubble",
+    ".cart-count-bubble",
+    "[data-cart-count]",
+    ".cart-count",
+    ".mini-cart",
+    "cart-notification",
+  ];
+  try {
+    const boxes = await page.evaluate((sels: string[]) => {
+      const rects: { x: number; y: number; w: number; h: number }[] = [];
+      for (const s of sels) {
+        document.querySelectorAll<HTMLElement>(s).forEach((el) => {
+          const r = el.getBoundingClientRect();
+          if (r.width && r.height) rects.push({ x: r.x, y: r.y, w: r.width, h: r.height });
+        });
+      }
+      if (!rects.length) return null;
+      const x1 = Math.max(0, Math.min(...rects.map((r) => r.x)) - 8);
+      const y1 = Math.max(0, Math.min(...rects.map((r) => r.y)) - 8);
+      const x2 = Math.max(...rects.map((r) => r.x + r.w)) + 8;
+      const y2 = Math.max(...rects.map((r) => r.y + r.h)) + 8;
+      return { x: x1, y: y1, width: x2 - x1, height: y2 - y1 };
+    }, selectors);
+    if (boxes && boxes.width > 0 && boxes.height > 0) return boxes as any;
+  } catch {}
+  return undefined;
+}
+
+async function captureCartScreenshot(page: Page, filePath: string) {
+  await disableAnimations(page);
+  // ensure body exists
+  try { await page.waitForSelector('body', { timeout: 5000 }); } catch {}
+  const tryOnce = async () => {
+    const clip = await getCartClip(page);
+    if (clip && clip.height && clip.width) {
+      return await page.screenshot({ path: filePath as any, clip, captureBeyondViewport: false });
+    }
+    return await page.screenshot({ path: filePath as any, fullPage: false });
+  };
+  try {
+    await tryOnce();
+  } catch (e: any) {
+    const msg = String(e?.message || e);
+    if (msg.includes('0 height') || msg.includes('captureScreenshot')) {
+      // Fallback: reset viewport & scroll top then retry without clip
+      try { await page.setViewport({ width: 1366, height: 900 }); } catch {}
+      try { await page.evaluate(() => window.scrollTo(0,0)); } catch {}
+      try { await page.screenshot({ path: filePath as any, fullPage: false }); } catch {}
+    } else {
+      throw e;
+    }
+  }
+}
+
 // Helper to extract the first CSV field (name) handling simple quotes
 function extractNameField(line: string): string | null {
   if (!line) return null;
@@ -632,6 +786,8 @@ async function runOne(
   try {
     if (!url) {
       row.error = "no_demo_url";
+      row.result = "NO-PASS";
+      logResult(tag || name || `job-${idx}`, "NO-PASS", row.error as string);
       writeRow(row);
       return await maybeHoldForDebug();
     }
@@ -646,6 +802,7 @@ async function runOne(
     console.log(`[JOB ${idx}] ${tag} → ${url}`);
 
     await page.setBypassCSP(true);
+    // Removed previous __name stub (was causing TypeError in some themes)
     await page.evaluateOnNewDocument(preloadCLS);
 
     let dialogAlerted = false;
@@ -655,10 +812,16 @@ async function runOne(
         await d.dismiss();
       } catch {}
     });
-    page.on("console", (msg) => console.log(`[JOB ${idx}]`, msg.text()));
-    page.on("requestfailed", (r) =>
-      console.warn(`[JOB ${idx}] ✖`, r.failure()?.errorText, r.url()),
-    );
+    page.on("console", (msg) => {
+      const t = msg.text();
+      if (QUIET_MODE) return; // suppress page console noise in quiet mode
+      console.log(`[JOB ${idx}]`, t);
+    });
+    page.on("requestfailed", (r) => {
+      const u = r.url();
+      if (QUIET_MODE && /monorail|collect|observeonly|produce_batch|private_access_tokens/.test(u)) return; // skip noisy analytics endpoints
+      console.warn(`[JOB ${idx}] ✖`, r.failure()?.errorText, u);
+    });
 
     // 1) Open theme landing
      await gotoWithRetry(page, url, `landing ${tag}`);
@@ -705,7 +868,7 @@ async function runOne(
     await gotoWithRetry(page, productUrl, `product ${tag}`);
 
     // 4) Pre-click screenshot (extra vs OLD; harmless + useful)
-    await page.screenshot({ path: preClickPath as any, fullPage: false });
+    await captureCartScreenshot(page, preClickPath);
     row.pre_click_png = path.relative(OUT_DIR, preClickPath);
 
     // 5) Find add-to-cart
@@ -718,6 +881,8 @@ async function runOne(
     row.add_btn_found = addBtn ? 1 : 0;
     if (!addBtn) {
       row.error = (row.error ? row.error + ";" : "") + "no_add_button";
+      row.result = "NO-PASS";
+      logResult(name || tag, "NO-PASS", String(row.error));
       writeRow(row);
       return await maybeHoldForDebug(page);
     }
@@ -728,7 +893,7 @@ async function runOne(
     await new Promise((r) => setTimeout(r, 5_000));
     row.clicked_ok = 1;
 
-    await page.screenshot({ path: postClickPath as any, fullPage: false });
+    await captureCartScreenshot(page, postClickPath);
     row.post_click_png = path.relative(OUT_DIR, postClickPath);
     row.cls_after_click = (await page.evaluate("window.__CLS || 0")) as number;
 
@@ -741,6 +906,7 @@ async function runOne(
         row.skipped_no_change = 1;
         row.result = "NO-PASS";
         row.error = (row.error ? row.error + ";" : "") + "base_no_change";
+        logResult(name || tag, "NO-PASS", "base_no_change");
         writeRow(row);
         return await maybeHoldForDebug(page);
       }
@@ -757,7 +923,7 @@ async function runOne(
     await clearSiteData(page, productUrl);
     await page.setBypassCSP(true);
 await gotoWithRetry(page, productUrl, `product reload ${tag}`);
-
+    const domBeforeRefresh = await captureCartDOMState(page);
     // 10) using the variant id call add.js, then run CLS start
     await page.evaluate(() => window.__clsReset && window.__clsReset());
     let manualOk = false;
@@ -826,7 +992,7 @@ await gotoWithRetry(page, productUrl, `product reload ${tag}`);
     await new Promise((r) => setTimeout(r, 5_000));
 
     // 11) Post-refresh screenshot + CLS
-    await page.screenshot({ path: postRefreshPath as any, fullPage: false });
+    await captureCartScreenshot(page, postRefreshPath);
     row.post_refresh_png = path.relative(OUT_DIR, postRefreshPath);
     row.cls_after_manual = (await page.evaluate("window.__CLS || 0")) as number;
 
@@ -840,12 +1006,21 @@ await gotoWithRetry(page, productUrl, `product reload ${tag}`);
       row.refresh_diff_png = path.relative(OUT_DIR, refreshDiffPath);
       const pct = Number(diff.pct.toFixed(4));
       row.refresh_change_pct = pct;
-      if (pct > THRESHOLD) {
-        row.result = "NO-PASS";
-        row.error =
-          (row.error ? row.error + ";" : "") + `refresh_above_threshold(${THRESHOLD})`;
-      } else {
+      const domAfterRefresh = await captureCartDOMState(page);
+      const domDelta = compareCartState(domBeforeRefresh, domAfterRefresh);
+      const passByDom = domDelta.changed;
+      const passByPixels = pct > THRESHOLD;
+      if (passByDom || passByPixels) {
         row.result = "PASS";
+        const reason = [
+          passByDom ? `DOM: ${domDelta.reasons.join("; ")}` : "",
+          passByPixels ? `PIXELS>${THRESHOLD}% (${pct}%)` : "",
+        ].filter(Boolean).join(" | ");
+        logResult(name || tag, "PASS", reason);
+      } else {
+        row.result = "NO-PASS";
+        row.error = (row.error ? row.error + ";" : "") + `pixels=${pct}%≤${THRESHOLD}%|DOM(no change)`;
+        logResult(name || tag, "NO-PASS", `pixels=${pct}%≤${THRESHOLD}% | DOM(no change)`);
       }
     } catch (e: any) {
       row.error =
@@ -858,6 +1033,8 @@ await gotoWithRetry(page, productUrl, `product reload ${tag}`);
     console.error(`[JOB ${idx}]`, err);
     row.error =
       (row.error ? row.error + ";" : "") + String(err?.message || err);
+    row.result = "NO-PASS";
+    logResult(name || tag, "NO-PASS", String(row.error));
     writeRow(row);
   } finally {
     if (!DEBUG_MODE) {
@@ -923,35 +1100,34 @@ await gotoWithRetry(page, productUrl, `product reload ${tag}`);
   });
 
   // Build worklist (preserves sorting, filters by ONLY_THEME if provided)
-const work = records.filter((rec) => {
-  const name = (rec.name || (rec as any).theme || "").toLowerCase();
-  // --- FIX mode: only rerun rows that had the target error ---
-  if (FIX_ERROR) {
-    if (!retryNames || retryNames.size === 0) return false;
+  const work = records.filter((rec) => {
+    const name = (rec.name || (rec as any).theme || "").toLowerCase();
+    // --- FIX mode: only rerun rows that had the target error ---
+    if (FIX_ERROR) {
+      if (!retryNames || retryNames.size === 0) return false;
 
-    // must have been in results.csv with that error
-    if (!retryNames.has(name)) return false;
+      // must have been in results.csv with that error
+      if (!retryNames.has(name)) return false;
 
-    // still allow narrowing with ONLY_THEME if provided
+      // still allow narrowing with ONLY_THEME if provided
+      if (ONLY_THEME && !name.includes(ONLY_THEME)) return false;
+
+      // RESUME_MODE is ignored in fix-mode: we want to rerun even if completed before
+      return true;
+    }
+    if (!ONLY_THEME && !RESUME_MODE) return true;
+
     if (ONLY_THEME && !name.includes(ONLY_THEME)) return false;
 
-    // RESUME_MODE is ignored in fix-mode: we want to rerun even if completed before
-    return true;
-  }
-  if (!ONLY_THEME && !RESUME_MODE) return true;
-
-  if (ONLY_THEME && !name.includes(ONLY_THEME)) return false;
-
-  return !(RESUME_MODE && completedNames.has(name));
-
-
-});
-
-  TOTAL = work.length;
-  console.log(`Total themes to process: ${TOTAL}`);
+    return !(RESUME_MODE && completedNames.has(name));
+  });
+  // Apply LIMIT after filtering (for quick smoke or scaling tests)
+  const limitedWork = LIMIT > 0 ? work.slice(0, LIMIT) : work;
+  TOTAL = limitedWork.length;
+  console.log(`Total themes to process (after limit/filter): ${TOTAL}`);
   printProgress();
   // Run with bounded concurrency
-  await runPool(work, CONCURRENCY, async (rec, idx) => {
+  await runPool(limitedWork, CONCURRENCY, async (rec, idx) => {
     ACTIVE++;
     console.log(`[POOL] start active=${ACTIVE}/${CONCURRENCY} idx=${idx}`);
     try {
@@ -979,7 +1155,7 @@ const work = records.filter((rec) => {
 
   if (!DEBUG_MODE) await browser.close();
   console.log(
-    `Done. processed=${work.length}, concurrency=${CONCURRENCY}` +
+    `Done. processed=${LIMIT>0?LIMIT:work.length}, concurrency=${CONCURRENCY}` +
       (DEBUG_MODE ? " (browser left open for debugging)" : ""),
   );
 })();
